@@ -475,6 +475,7 @@ enum lws_callback_reasons {
 	LWS_CALLBACK_RECEIVE_CLIENT_HTTP			= 46,
 	LWS_CALLBACK_COMPLETED_CLIENT_HTTP			= 47,
 	LWS_CALLBACK_RECEIVE_CLIENT_HTTP_READ			= 48,
+	LWS_CALLBACK_HTTP_DROP_PROTOCOL				= 49,
 
 	/****** add new things just above ---^ ******/
 
@@ -1774,6 +1775,69 @@ LWS_VISIBLE LWS_EXTERN int LWS_WARN_UNUSED_RESULT
 lws_add_http_header_status(struct lws *wsi,
 			   unsigned int code, unsigned char **p,
 			   unsigned char *end);
+
+LWS_VISIBLE LWS_EXTERN const char *
+lws_urlencode(char *escaped, const char *string, int len);
+
+LWS_VISIBLE LWS_EXTERN const char *
+lws_sql_purify(char *escaped, const char *string, int len);
+
+
+
+/*
+ * URLDECODE 1 / 2
+ *
+ * This simple urldecode only operates until the first '\0' and requires the
+ * data to exist all at once
+ */
+
+LWS_VISIBLE LWS_EXTERN int
+lws_urldecode(char *string, const char *escaped, int len);
+
+#ifdef LWS_WITH_STATEFUL_URLDECODE
+
+/*
+ * URLDECODE 2 / 2
+ *
+ * These apis let you manage a form data parser that
+ *
+ * Since it's stateful, and the decoded area is malloc'd, this is robust
+ * enough to handle the form data coming in multiple POST_BODY packets without
+ * having to get into any special code.
+ */
+
+typedef int (*lws_urldecode_stateful_cb)(void *data,
+		const char *name, char **buf, int len, int final);
+
+struct lws_urldecode_stateful_param_array;
+
+LWS_VISIBLE LWS_EXTERN struct lws_urldecode_stateful_param_array *
+lws_urldecode_spa_create(const char * const *param_names, int count_params,
+			 int max_storage, lws_urldecode_stateful_cb opt_cb,
+			 void *opt_data);
+
+LWS_VISIBLE LWS_EXTERN int
+lws_urldecode_spa_process(struct lws_urldecode_stateful_param_array *ludspa,
+			  const char *in, int len);
+
+LWS_VISIBLE LWS_EXTERN int
+lws_urldecode_spa_finalize(struct lws_urldecode_stateful_param_array *ludspa);
+
+LWS_VISIBLE LWS_EXTERN int
+lws_urldecode_spa_get_length(struct lws_urldecode_stateful_param_array *ludspa,
+			     int n);
+
+LWS_VISIBLE LWS_EXTERN const char *
+lws_urldecode_spa_get_string(struct lws_urldecode_stateful_param_array *ludspa,
+			     int n);
+
+LWS_VISIBLE LWS_EXTERN int
+lws_urldecode_spa_destroy(struct lws_urldecode_stateful_param_array *ludspa);
+
+#endif
+
+
+
 
 LWS_VISIBLE LWS_EXTERN int LWS_WARN_UNUSED_RESULT
 lws_http_redirect(struct lws *wsi, int code, const unsigned char *loc, int len,

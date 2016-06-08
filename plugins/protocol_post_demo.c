@@ -25,9 +25,17 @@
 #include <string.h>
 
 struct per_session_data__post_demo {
-	char post_string[256];
+	struct lws_urldecode_stateful_param_array *spa;
 	char result[500 + LWS_PRE];
 	int result_len;
+};
+
+static const char * const param_names[] = {
+	"Text",
+};
+
+enum enum_param_names {
+	EPN_TEXT,
 };
 
 static int
@@ -43,16 +51,23 @@ callback_post_demo(struct lws *wsi, enum lws_callback_reasons reason,
 	switch (reason) {
 
 	case LWS_CALLBACK_HTTP_BODY:
-		lwsl_debug("LWS_CALLBACK_HTTP_BODY: len %d\n", (int)len);
-		strncpy(pss->post_string, in, sizeof (pss->post_string) -1);
-		pss->post_string[sizeof(pss->post_string) - 1] = '\0';
+		/* create the POST argument parser if not already existing */
+		if (!pss->spa) {
+			pss->spa = lws_urldecode_spa_create(param_names,
+					ARRAY_SIZE(param_names), 1024,
+					NULL, NULL);
+			if (!pss->spa)
+				return -1;
+		}
 
-		if (len < sizeof(pss->post_string) - 1)
-			pss->post_string[len] = '\0';
+		/* let it parse the POST data */
+		if (lws_urldecode_spa_process(pss->spa, in, len))
+			return -1;
 		break;
 
 	case LWS_CALLBACK_HTTP_WRITEABLE:
-		lwsl_debug("LWS_CALLBACK_HTTP_WRITEABLE: sending %d\n", pss->result_len);
+		lwsl_debug("LWS_CALLBACK_HTTP_WRITEABLE: sending %d\n",
+			   pss->result_len);
 		n = lws_write(wsi, (unsigned char *)pss->result + LWS_PRE,
 			      pss->result_len, LWS_WRITE_HTTP);
 		if (n < 0)
@@ -66,9 +81,20 @@ callback_post_demo(struct lws *wsi, enum lws_callback_reasons reason,
 		 * respond to the client with a redirect to show the
 		 * results
 		 */
+
+		/* call to inform no more payload data coming */
+		lws_urldecode_spa_finalize(pss->spa);
+
 		pss->result_len = sprintf((char *)pss->result + LWS_PRE,
-			    "<html><body><h1>Form results</h1>'%s'<br>"
-			    "</body></html>", pss->post_string);
+			    "<html><body><h1>Form results</h1>"
+			    "<b>Text (after urldecoding)</b>:'%s' (len %d)<br>"
+			    "</body></html>",
+			    lws_urldecode_spa_get_string(pss->spa, EPN_TEXT),
+			    lws_urldecode_spa_get_length(pss->spa, EPN_TEXT));
+
+		/* finished with the POST argument parser */
+//		lws_urldecode_spa_destroy(pss->spa);
+//		pss->spa = NULL;
 
 		p = buffer + LWS_PRE;
 		start = p;
@@ -94,6 +120,13 @@ callback_post_demo(struct lws *wsi, enum lws_callback_reasons reason,
 		 * headers
 		 */
 		lws_callback_on_writable(wsi);
+		break;
+
+	case LWS_CALLBACK_HTTP_DROP_PROTOCOL:
+		if (pss->spa) {
+			lws_urldecode_spa_destroy(pss->spa);
+			pss->spa = NULL;
+		}
 		break;
 
 	default:

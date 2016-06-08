@@ -208,7 +208,7 @@ lws_close_free_wsi(struct lws *wsi, enum lws_close_status reason)
 	    wsi->u.http.fd != LWS_INVALID_FILE) {
 		lws_plat_file_close(wsi, wsi->u.http.fd);
 		wsi->u.http.fd = LWS_INVALID_FILE;
-		wsi->vhost->protocols[0].callback(wsi,
+		wsi->vhost->protocols->callback(wsi,
 			LWS_CALLBACK_CLOSED_HTTP, wsi->user_space, NULL, 0);
 	}
 	if (wsi->socket_is_permanently_unusable ||
@@ -247,9 +247,14 @@ lws_close_free_wsi(struct lws *wsi, enum lws_close_status reason)
 	    wsi->mode == LWSCM_WSCL_ISSUE_HANDSHAKE)
 		goto just_kill_connection;
 
-	if (wsi->mode == LWSCM_HTTP_SERVING)
-		wsi->vhost->protocols[0].callback(wsi, LWS_CALLBACK_CLOSED_HTTP,
+	if (wsi->mode == LWSCM_HTTP_SERVING) {
+		if (wsi->user_space)
+			wsi->vhost->protocols->callback(wsi,
+						LWS_CALLBACK_HTTP_DROP_PROTOCOL,
 					       wsi->user_space, NULL, 0);
+		wsi->vhost->protocols->callback(wsi, LWS_CALLBACK_CLOSED_HTTP,
+					       wsi->user_space, NULL, 0);
+	}
 	if (wsi->mode == LWSCM_HTTP_CLIENT)
 		wsi->vhost->protocols[0].callback(wsi, LWS_CALLBACK_CLOSED_CLIENT_HTTP,
 					       wsi->user_space, NULL, 0);
@@ -483,7 +488,7 @@ just_kill_connection:
 					wsi->user_space, NULL, 0);
 	} else if (wsi->mode == LWSCM_HTTP_SERVING_ACCEPTED) {
 		lwsl_debug("calling back CLOSED_HTTP\n");
-		wsi->vhost->protocols[0].callback(wsi, LWS_CALLBACK_CLOSED_HTTP,
+		wsi->vhost->protocols->callback(wsi, LWS_CALLBACK_CLOSED_HTTP,
 					       wsi->user_space, NULL, 0 );
 	} else if (wsi->mode == LWSCM_WSCL_WAITING_SERVER_REPLY ||
 		   wsi->mode == LWSCM_WSCL_WAITING_CONNECT) {
@@ -1678,10 +1683,11 @@ lws_socket_bind(struct lws_vhost *vhost, int sockfd, int port,
 	return port;
 }
 
-LWS_VISIBLE LWS_EXTERN int
-lws_urlencode(const char *in, int inlen, char *out, int outlen)
+static const char *hex = "0123456789ABCDEF";
+
+static int
+urlencode(const char *in, int inlen, char *out, int outlen)
 {
-	const char *hex = "0123456789ABCDEF";
 	char *start = out, *end = out + outlen;
 
 	while (inlen-- && out < end - 4) {
@@ -1691,13 +1697,18 @@ lws_urlencode(const char *in, int inlen, char *out, int outlen)
 		    *in == '-' ||
 		    *in == '_' ||
 		    *in == '.' ||
-		    *in == '~')
+		    *in == '~') {
 			*out++ = *in++;
-		else {
-			*out++ = '%';
-			*out++ = hex[(*in) >> 4];
-			*out++ = hex[(*in++) & 15];
+			continue;
 		}
+		if (*in == ' ') {
+			*out++ = '+';
+			in++;
+			continue;
+		}
+		*out++ = '%';
+		*out++ = hex[(*in) >> 4];
+		*out++ = hex[(*in++) & 15];
 	}
 	*out = '\0';
 
@@ -1706,6 +1717,512 @@ lws_urlencode(const char *in, int inlen, char *out, int outlen)
 
 	return out - start;
 }
+
+/**
+ * lws_sql_purify() - like strncpy but with escaping for sql quotes
+ *
+ * @escaped: output buffer
+ * @string: input buffer ('/0' terminated)
+ * @len: output buffer max length
+ *
+ * Because escaping expands the output string, it's not
+ * possible to do it in-place, ie, with escaped == string
+ */
+
+LWS_VISIBLE LWS_EXTERN const char *
+lws_sql_purify(char *escaped, const char *string, int len)
+{
+	const char *p = string;
+	char *q = escaped;
+
+	while (*p && len-- > 2) {
+		if (*p == '\'') {
+			*q++ = '\\';
+			*q++ = '\'';
+			len --;
+			p++;
+		} else
+			*q++ = *p++;
+	}
+	*q = '\0';
+
+	return escaped;
+}
+
+/**
+ * lws_urlencode() - like strncpy but with urlencoding
+ *
+ * @escaped: output buffer
+ * @string: input buffer ('/0' terminated)
+ * @len: output buffer max length
+ *
+ * Because urlencoding expands the output string, it's not
+ * possible to do it in-place, ie, with escaped == string
+ */
+
+LWS_VISIBLE LWS_EXTERN const char *
+lws_urlencode(char *escaped, const char *string, int len)
+{
+	const char *p = string;
+	char *q = escaped;
+
+	while (*p && len-- > 3) {
+		if (*p == ' ') {
+			*q++ = '+';
+			p++;
+			continue;
+		}
+		if ((*p >= '0' && *p <= '9') ||
+		    (*p >= 'A' && *p <= 'Z') ||
+		    (*p >= 'a' && *p <= 'z')) {
+			*q++ = *p++;
+			continue;
+		}
+		*q++ = '%';
+		*q++ = hex[(*p >> 4) & 0xf];
+		*q++ = hex[*p & 0xf];
+
+		len -= 2;
+		p++;
+	}
+	*q = '\0';
+
+	return escaped;
+}
+
+/**
+ * lws_urldecode() - like strncpy but with urldecoding
+ *
+ * @string: output buffer
+ * @escaped: input buffer ('\0' terminated)
+ * @len: output buffer max length
+ *
+ * This is only useful for '\0' terminated strings
+ *
+ * Since urldecoding only shrinks the output string, it is possible to
+ * do it in-place, ie, string == escaped
+ */
+
+LWS_VISIBLE LWS_EXTERN int
+lws_urldecode(char *string, const char *escaped, int len)
+{
+	int state = 0, n;
+	char sum = 0;
+
+	while (*escaped && len) {
+		switch (state) {
+		case 0:
+			if (*escaped == '%') {
+				state++;
+				escaped++;
+				continue;
+			}
+			if (*escaped == '+') {
+				escaped++;
+				*string++ = ' ';
+				len--;
+				continue;
+			}
+			*string++ = *escaped++;
+			len--;
+			break;
+		case 1:
+			n = char_to_hex(*escaped);
+			if (n < 0)
+				return -1;
+			escaped++;
+			sum = n << 4;
+			state++;
+			break;
+
+		case 2:
+			n = char_to_hex(*escaped);
+			if (n < 0)
+				return -1;
+			escaped++;
+			*string++ = sum | n;
+			len--;
+			state = 0;
+			break;
+		}
+
+	}
+	*string = '\0';
+
+	return 0;
+}
+
+#ifdef LWS_WITH_STATEFUL_URLDECODE
+
+enum urldecode_stateful {
+	US_NAME,
+	US_IDLE,
+	US_PC1,
+	US_PC2,
+};
+
+struct lws_urldecode_stateful {
+	char *out;
+	void *data;
+	char name[32];
+	int out_len;
+	int pos;
+
+	enum urldecode_stateful state;
+
+	lws_urldecode_stateful_cb output;
+};
+
+static struct lws_urldecode_stateful *
+lws_urldecode_s_create(char *out, int out_len, void *data,
+		       lws_urldecode_stateful_cb output)
+{
+	struct lws_urldecode_stateful *s = lws_malloc(sizeof(*s));
+
+	if (!s)
+		return NULL;
+
+	s->out = out;
+	s->out_len  = out_len;
+	s->output = output;
+	s->pos = 0;
+	s->state = US_NAME;
+	s->name[0] = '\0';
+	s->data = data;
+
+	return s;
+}
+
+static int
+lws_urldecode_s_process(struct lws_urldecode_stateful *s, const char *in, int len)
+{
+	int n;
+	char sum = 0;
+
+	while (len--) {
+		if (s->pos == s->out_len) {
+			if (s->output(s->data, s->name, &s->out, s->pos, 0))
+				return -1;
+
+			s->pos = 0;
+		}
+
+		switch (s->state) {
+		case US_NAME:
+			//lwsl_notice("US_NAME: %c\n", *in);
+			if (*in == '=') {
+				s->name[s->pos] = '\0';
+				s->pos = 0;
+				s->state = US_IDLE;
+				in++;
+				continue;
+			}
+			if (*in == '&') {
+				s->name[s->pos] = '\0';
+				if (s->output(s->data, s->name, &s->out, s->pos, 1))
+					return -1;
+				s->pos = 0;
+				s->state = US_IDLE;
+				in++;
+				continue;
+			}
+			if (s->pos >= sizeof(s->name) - 1) {
+				lwsl_notice("Name too long\n");
+				return -1;
+			}
+			s->name[s->pos++] = *in++;
+			break;
+		case US_IDLE:
+			//lwsl_notice("US_IDLE: %c\n", *in);
+			if (*in == '%') {
+				s->state++;
+				in++;
+				continue;
+			}
+			if (*in == '&') {
+				s->out[s->pos] = '\0';
+				if (s->output(s->data, s->name, &s->out, s->pos, 1))
+					return -1;
+				s->pos = 0;
+				s->state = US_NAME;
+				in++;
+				continue;
+			}
+			if (*in == '+') {
+				in++;
+				s->out[s->pos++] = ' ';
+				continue;
+			}
+			s->out[s->pos++] = *in++;
+			break;
+		case US_PC1:
+			n = char_to_hex(*in);
+			if (n < 0)
+				return -1;
+
+			in++;
+			sum = n << 4;
+			s->state++;
+			break;
+
+		case US_PC2:
+			n = char_to_hex(*in);
+			if (n < 0)
+				return -1;
+
+			in++;
+			s->out[s->pos++] = sum | n;
+			s->state = US_IDLE;
+			break;
+		}
+
+	}
+
+	return 0;
+}
+
+static int
+lws_urldecode_s_destroy(struct lws_urldecode_stateful *s)
+{
+	int ret = 0;
+
+	if (s->state != US_IDLE)
+		ret = -1;
+
+	if (!ret)
+		if (s->output(s->data, s->name, &s->out, s->pos, 1))
+			ret = -1;
+
+	lws_free(s);
+
+	return ret;
+}
+
+struct lws_urldecode_stateful_param_array {
+	struct lws_urldecode_stateful *s;
+	lws_urldecode_stateful_cb opt_cb;
+	const char * const *param_names;
+	int count_params;
+	char **params;
+	int *param_length;
+	void *opt_data;
+
+	char *storage;
+	char *end;
+	int max_storage;
+};
+
+static int
+lws_urldecode_spa_lookup(struct lws_urldecode_stateful_param_array *spa,
+			 const char *name)
+{
+	int n;
+
+	for (n = 0; n < spa->count_params; n++)
+		if (!strcmp(spa->param_names[n], name))
+			return n;
+
+	return -1;
+}
+
+static int
+lws_urldecode_spa_cb(void *data, const char *name, char **buf, int len,
+		     int final)
+{
+	struct lws_urldecode_stateful_param_array *spa =
+			(struct lws_urldecode_stateful_param_array *)data;
+	int n;
+
+	if (spa->opt_cb) {
+		n = spa->opt_cb(spa->opt_data, name, buf, len, final);
+
+		if (n < 0)
+			return -1;
+		if (n > 0)
+			return 0;
+	}
+	n = lws_urldecode_spa_lookup(spa, name);
+
+	lwsl_debug("%s: name %s, buf=%p, len=%d\n", __func__, name, buf, len);
+
+	if (n == -1 || !len) /* unrecognized */
+		return 0;
+
+	if (!spa->params[n])
+		spa->params[n] = *buf;
+
+	if ((*buf) + len >= spa->end) {
+		lwsl_notice("%s: exceeded storage\n", __func__);
+		return -1;
+	}
+
+	spa->param_length[n] += len;
+
+	/* move it on inside storage */
+	(*buf) += len;
+	*((*buf)++) = '\0';
+
+	return 0;
+}
+
+/**
+ * lws_urldecode_spa_create() - create urldecode parser
+ *
+ * @param_names: array of form parameter names, like "username"
+ * @count_params: count of param_names
+ * @max_storage: total amount of form parameter values we can store
+ * @opt_cb: NULL, or callback to filter data.  Needed for file transfer case
+ * @opt_data: NULL, or user pointer provided to opt_cb.
+ *
+ * Creates a urldecode parser and initializes it.
+ *
+ * @opt_cb can be NULL if you just want normal name=value parsing, however
+ * if one or more entries in your form are bulk data (file transfer), you
+ * can provide this callback and filter on the name callback parameter to
+ * treat that urldecoded data separately.  The callback should return -1
+ * in case of fatal error, 1 if it handled the data itself and 0 if it
+ * wants the data to be handled as name=value.
+ */
+
+LWS_VISIBLE LWS_EXTERN struct lws_urldecode_stateful_param_array *
+lws_urldecode_spa_create(const char * const *param_names, int count_params,
+			 int max_storage, lws_urldecode_stateful_cb opt_cb,
+			 void *opt_data)
+{
+	struct lws_urldecode_stateful_param_array *spa = lws_malloc(sizeof(*spa));
+
+	if (!spa)
+		return NULL;
+
+	spa->param_names = param_names;
+	spa->count_params = count_params;
+	spa->max_storage = max_storage;
+	spa->opt_cb = opt_cb;
+	spa->opt_data = opt_data;
+
+	spa->storage = lws_malloc(max_storage);
+	if (!spa->storage)
+		goto bail2;
+	spa->end = spa->storage + max_storage - 1;
+
+	spa->params = lws_zalloc(sizeof(char *) * count_params);
+	if (!spa->params)
+		goto bail3;
+
+	spa->s = lws_urldecode_s_create(spa->storage, max_storage, spa,
+					lws_urldecode_spa_cb);
+	if (!spa->s)
+		goto bail4;
+
+	spa->param_length = lws_zalloc(sizeof(int) * count_params);
+	if (!spa->param_length)
+		goto bail5;
+
+	return spa;
+
+bail5:
+	lws_urldecode_s_destroy(spa->s);
+bail4:
+	lws_free(spa->params);
+bail3:
+	lws_free(spa->storage);
+bail2:
+	lws_free(spa);
+
+	return NULL;
+}
+
+/**
+ * lws_urldecode_spa_process() - parses a chunk of input data
+ *
+ * @ludspa: the parser object previously created
+ * @in: incoming, urlencoded data
+ * @len: count of bytes valid at @in
+ */
+
+LWS_VISIBLE LWS_EXTERN int
+lws_urldecode_spa_process(struct lws_urldecode_stateful_param_array *ludspa,
+			  const char *in, int len)
+{
+	return lws_urldecode_s_process(ludspa->s, in, len);
+}
+
+/**
+ * lws_urldecode_spa_get_length() - return length of parameter value
+ *
+ * @ludspa: the parser object previously created
+ * @n: parameter ordinal to return length of value for
+ */
+
+LWS_VISIBLE LWS_EXTERN int
+lws_urldecode_spa_get_length(struct lws_urldecode_stateful_param_array *ludspa,
+			     int n)
+{
+	if (n >= ludspa->count_params)
+		return 0;
+
+	return ludspa->param_length[n];
+}
+
+/**
+ * lws_urldecode_spa_get_string() - return pointer to parameter value
+ *
+ * @ludspa: the parser object previously created
+ * @n: parameter ordinal to return pointer to value for
+ */
+
+LWS_VISIBLE LWS_EXTERN const char *
+lws_urldecode_spa_get_string(struct lws_urldecode_stateful_param_array *ludspa,
+			     int n)
+{
+	if (n >= ludspa->count_params)
+		return NULL;
+
+	return ludspa->params[n];
+}
+
+/**
+ * lws_urldecode_spa_finalize() - indicate incoming data completed
+ *
+ * @ludspa: the parser object previously created
+ */
+
+LWS_VISIBLE LWS_EXTERN int
+lws_urldecode_spa_finalize(struct lws_urldecode_stateful_param_array *spa)
+{
+	if (spa->s) {
+		lws_urldecode_s_destroy(spa->s);
+		spa->s = NULL;
+	}
+
+	return 0;
+}
+
+/**
+ * lws_urldecode_spa_destroy() - destroy parser object
+ *
+ * @ludspa: the parser object previously created
+ */
+
+LWS_VISIBLE LWS_EXTERN int
+lws_urldecode_spa_destroy(struct lws_urldecode_stateful_param_array *spa)
+{
+	int n = 0;
+
+	if (spa->s)
+		lws_urldecode_s_destroy(spa->s);
+
+	lwsl_debug("%s\n", __func__);
+
+	lws_free(spa->param_length);
+	lws_free(spa->params);
+	lws_free(spa->storage);
+	lws_free(spa);
+
+	return n;
+}
+
+#endif
 
 LWS_VISIBLE LWS_EXTERN int
 lws_finalize_startup(struct lws_context *context)
@@ -1892,7 +2409,7 @@ lws_cgi(struct lws *wsi, const char * const *exec_array, int script_uri_path_len
 				*p++ = *t++;
 			if (*t == '=')
 				*p++ = *t++;
-			i = lws_urlencode(t, i- (t - tok), p, end - p);
+			i = urlencode(t, i- (t - tok), p, end - p);
 			if (i > 0) {
 				p += i;
 				*p++ = '&';

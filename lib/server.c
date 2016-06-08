@@ -716,14 +716,6 @@ lws_http_action(struct lws *wsi)
 			goto after;
 		}
 
-		/* deferred cleanup and reset to protocols[0] */
-
-		if (wsi->protocol != &wsi->vhost->protocols[0])
-			if (!wsi->user_space_externally_allocated)
-				lws_free_set_NULL(wsi->user_space);
-
-		wsi->protocol = &wsi->vhost->protocols[0];
-
 #ifdef LWS_WITH_CGI
 		/* did we hit something with a cgi:// origin? */
 		if (hit->origin_protocol == LWSMPRO_CGI) {
@@ -1279,10 +1271,17 @@ lws_http_transaction_completed(struct lws *wsi)
 		return 1;
 	}
 
+	n = wsi->protocol->callback(wsi, LWS_CALLBACK_HTTP_DROP_PROTOCOL,
+				    wsi->user_space, NULL, 0);
+
+	if (!wsi->user_space_externally_allocated)
+		lws_free_set_NULL(wsi->user_space);
+
+	wsi->protocol = &wsi->vhost->protocols[0];
+
 	/* otherwise set ourselves up ready to go again */
 	wsi->state = LWSS_HTTP;
 	wsi->mode = LWSCM_HTTP_SERVING;
-	/* reset of non [0] protocols (and freeing of user_space) is deferred */
 	wsi->u.http.content_length = 0;
 	wsi->hdr_parsing_completed = 0;
 #ifdef LWS_WITH_ACCESS_LOG
