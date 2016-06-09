@@ -82,7 +82,6 @@
 #include <in6addr.h>
 #endif
 #include <mstcpip.h>
-#include <io.h>
 
 #ifndef __func__
 #define __func__ __FUNCTION__
