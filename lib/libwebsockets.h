@@ -1539,7 +1539,8 @@ struct lws_context_creation_info {
 	const char *log_filepath;			/* VH */
 	const struct lws_http_mount *mounts;		/* VH */
 	const char *server_string;			/* context */
-
+	long ssl_options_set;				/* VH */
+ 	long ssl_options_clear;				/* VH */
 	/* Add new things just above here ---^
 	 * This is part of the ABI, don't needlessly break compatibility
 	 *
