@@ -194,12 +194,15 @@ lws_ssl_destroy(struct lws_vhost *vhost)
 	if (!vhost->user_supplied_ssl_ctx && vhost->ssl_client_ctx)
 		SSL_CTX_free(vhost->ssl_client_ctx);
 
-#if (OPENSSL_VERSION_NUMBER < 0x01000000) || defined(USE_WOLFSSL)
+// after 1.1.0 no need
+#if (OPENSSL_VERSION_NUMBER <  0x10100000)
+// <= 1.0.1f = old api, 1.0.1g+ = new api
+#if (OPENSSL_VERSION_NUMBER <= 0x1000106f) || defined(USE_WOLFSSL)
 	ERR_remove_state(0);
 #else
-#if (OPENSSL_VERSION_NUMBER >= 0x10100005L) && \
-	!defined(LIBRESSL_VERSION_NUMBER) && \
-	!defined(OPENSSL_IS_BORINGSSL)
+#if OPENSSL_VERSION_NUMBER >= 0x1010005f && \
+    !defined(LIBRESSL_VERSION_NUMBER) && \
+    !defined(OPENSSL_IS_BORINGSSL)
 	ERR_remove_thread_state();
 #else
 	ERR_remove_thread_state(NULL);
@@ -208,6 +211,8 @@ lws_ssl_destroy(struct lws_vhost *vhost)
 	ERR_free_strings();
 	EVP_cleanup();
 	CRYPTO_cleanup_all_ex_data();
+#endif
+
 #endif
 #endif
 }
@@ -688,12 +693,16 @@ lws_ssl_context_destroy(struct lws_context *context)
 #else
 #if defined(LWS_USE_MBEDTLS)
 #else
-#if (OPENSSL_VERSION_NUMBER < 0x01000000) || defined(USE_WOLFSSL)
+
+// after 1.1.0 no need
+#if (OPENSSL_VERSION_NUMBER <  0x10100000)
+// <= 1.0.1f = old api, 1.0.1g+ = new api
+#if (OPENSSL_VERSION_NUMBER <= 0x1000106f) || defined(USE_WOLFSSL)
 	ERR_remove_state(0);
 #else
-#if (OPENSSL_VERSION_NUMBER >= 0x10100005L) && \
-	!defined(LIBRESSL_VERSION_NUMBER) && \
-	!defined(OPENSSL_IS_BORINGSSL)
+#if OPENSSL_VERSION_NUMBER >= 0x1010005f && \
+    !defined(LIBRESSL_VERSION_NUMBER) && \
+    !defined(OPENSSL_IS_BORINGSSL)
 	ERR_remove_thread_state();
 #else
 	ERR_remove_thread_state(NULL);
@@ -703,5 +712,7 @@ lws_ssl_context_destroy(struct lws_context *context)
 	EVP_cleanup();
 	CRYPTO_cleanup_all_ex_data();
 #endif
+#endif
+
 #endif
 }
