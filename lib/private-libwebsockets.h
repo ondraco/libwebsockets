@@ -35,6 +35,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#ifdef _WIN32_WCE
+#include <ctime>
+#endif
+
 #include <ctype.h>
 #include <limits.h>
 #include <stdarg.h>

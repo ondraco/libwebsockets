@@ -27,18 +27,6 @@ time_in_microseconds()
 	return (datetime.QuadPart - DELTA_EPOCH_IN_MICROSECS) / 10;
 }
 
-#ifdef _WIN32_WCE
-time_t time(time_t *t)
-{
-	time_t ret = time_in_microseconds() / 1000000;
-
-	if(t != NULL)
-		*t = ret;
-
-	return ret;
-}
-#endif
-
 /* file descriptor hash management */
 
 struct lws *
